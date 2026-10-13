@@ -1,5 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {makeAdaptiveProvider,nativeOverrides,defaults,validateSettings} from './settings.js';
+import {beginActivity,finishActivity,listActivities} from './activity.js';
 const req=(options={})=>({parent:{session:{header:{delegationDepth:0}},options:{}},prompt:[{type:'text',text:'bounded task'}],agentOptions:options});
 test('live configurable capacity and per-task model routing',async()=>{
  let settings={...defaults,max_parallel:2};let live=0,peak=0;const models=[];
@@ -43,8 +44,9 @@ test('UI restores parent default if worker settings cannot be written',async()=>
 });
 test('ordered board hands each completed result to the next model and applies Fast only to Codex',async()=>{
  const seen=[];const board={stages:[{role:'Plan',instruction:'Plan only',provider:'antigravity',model:'gemini-test',fast:false},{role:'Adapt',instruction:'Adapt for Codex',provider:'claude',model:'claude-test',fast:false},{role:'Implement',instruction:'Implement the plan',provider:'codex',model:'gpt-test',fast:true}]};
- const result=await runBoard({board,task:'Build a widget',parent:{},signal:new AbortController().signal,llm:{resolveCallConfig:async r=>seen.push(['route',r.provider,r.model])},subagents:{start:async(_provider,spec)=>{seen.push(['stage',spec.agentOptions.provider,spec.agentOptions.fast,spec.prompt[0].text]);return {result:Promise.resolve({stopReason:'completed',output:[{type:'text',text:`handoff ${seen.filter(x=>x[0]==='stage').length}`}] }),dispose:async()=>seen.push(['dispose'])};}}});
- assert.equal(result.final,'handoff 3');assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='claude')[3],/handoff 1/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/handoff 2/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/Original user task.*Build a widget/s);assert.equal(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[2],true);assert.equal(seen.filter(x=>x[0]==='dispose').length,3);
+ const result=await runBoard({board,task:'Build a widget',parent:{},signal:new AbortController().signal,llm:{resolveCallConfig:async r=>seen.push(['route',r.provider,r.model])},onStage:e=>seen.push(['event',e.event,e.role??e.status]),subagents:{start:async(_provider,spec)=>{seen.push(['provider',_provider,spec.toolFilter]);seen.push(['stage',spec.agentOptions.provider,spec.agentOptions.fast,spec.prompt[0].text]);return {result:Promise.resolve({stopReason:'completed',output:[{type:'text',text:`handoff ${seen.filter(x=>x[0]==='stage').length}`}] }),dispose:async()=>seen.push(['dispose'])};}}});
+ assert.equal(result.final,'handoff 3');assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='claude')[3],/handoff 1/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/handoff 2/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/Original user task.*Build a widget/s);assert.equal(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[2],true);assert.deepEqual(seen.filter(x=>x[0]==='provider').map(x=>[x[1],x[2]]),[['spawn',{allow:[]}],['spawn',{allow:[]}],['adaptive-worker',undefined]]);assert.equal(seen.filter(x=>x[0]==='dispose').length,3);
+ assert.deepEqual(seen.filter(x=>x[0]==='event').map(x=>x[1]),['started','finished','started','finished','started','finished']);
 });
 test('board stops on failure and keeps private local configuration out of source',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'dsh-board-'));const path=join(dir,'board.json');
@@ -55,4 +57,13 @@ test('board stops on failure and keeps private local configuration out of source
 test('native Codex worker receives per-run Fast setting',async()=>{
  let config;const p=makeAdaptiveProvider({createNative:async o=>{config=o;return {start:async()=>({result:Promise.resolve({}),dispose:async()=>{}})};}});
  const run=await p.start(req({provider:'codex',model:'gpt-6.1-sol',fast:true,readOnly:true}));assert.equal(config.fast,true);assert.equal(config.readOnly,true);assert(nativeOverrides(defaults,undefined,true,true).includes('service_tier="fast"'));assert(nativeOverrides(defaults,undefined,true,true).includes('sandbox_mode="read-only"'));await run.dispose();
+});
+test('command graph details stay scoped to one session and follow worker completion',async()=>{
+ const events=[];const sessionId='graph-test-session';
+ const p=makeAdaptiveProvider({getHarness:()=>({start:async()=>({result:Promise.resolve({stopReason:'completed',output:[{type:'text',text:'finished task'}]}),dispose:async()=>{}})}),onState:e=>events.push(e)});
+ const request=req({provider:'claude',model:'claude-test'});request.parent.session.header.id=sessionId;request.label='Review files';request.prompt=[{type:'text',text:'Check only the named files'}];
+ const run=await p.start(request);await run.result;await run.dispose();
+ for(const event of events){if(event.event==='started')beginActivity(event.sessionId,{id:event.id,label:event.label,prompt:event.prompt});if(event.event==='finished')finishActivity(event.sessionId,event.id,event.status,event.output);}
+ assert.deepEqual(listActivities('other-session'),[]);
+ assert.deepEqual(listActivities(sessionId).map(row=>[row.label,row.prompt,row.status,row.output]),[['Review files','Check only the named files','completed','finished task']]);
 });

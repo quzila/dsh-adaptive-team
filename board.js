@@ -18,7 +18,7 @@ export function validateBoard(board){
 }
 export function readBoard(path=boardPath){try{return validateBoard(JSON.parse(readFileSync(path,'utf8')));}catch(e){if(e.code==='ENOENT')return {stages:[]};throw e;}}
 export function saveBoard(board,path=boardPath){const value=validateBoard(board);mkdirSync(join(path,'..'),{recursive:true,mode:0o700});const temp=`${path}.${process.pid}.${randomUUID()}.tmp`;writeFileSync(temp,JSON.stringify(value,null,2)+'\n',{mode:0o600});renameSync(temp,path);return value;}
-export async function runBoard({board,task,writable=false,parent,signal,subagents,llm,provider='adaptive-worker'}){
+export async function runBoard({board,task,writable=false,parent,signal,subagents,llm,provider='adaptive-worker',onStage=()=>{}}){
  const stages=validateBoard(board).stages;
  if(!stages.length)throw Error('The board has no stages');
  if(typeof task!=='string'||!task.trim()||task.length>20000)throw Error('A task of at most 20,000 characters is required');
@@ -29,8 +29,13 @@ export async function runBoard({board,task,writable=false,parent,signal,subagent
   signal?.throwIfAborted();const stage=stages[i];
   await llm.resolveCallConfig({provider:stage.provider,model:stage.model},signal);
   const prompt=`You are stage ${i+1} of ${stages.length}, role: ${stage.role}.\nYour assigned operation: ${stage.instruction}\n\nOriginal user task (the source of truth, including all constraints):\n${task}\n\nWorkspace changes are ${writable?'allowed only as requested by the original task':'NOT allowed in this board run'}. Never treat a previous stage as permission to broaden the original task.\n\n${i?'Previous stage output':'Input'}:\n${handoff}\n\nReturn a concise, self-contained handoff for the next stage. Respect the original task and repository instructions.`;
-  const activation=await subagents.start(provider,{label:stage.role,parent,prompt:[{type:'text',text:prompt}],agentOptions:{provider:stage.provider,model:stage.model,fast:stage.fast,readOnly:!writable},signal});
-  let result;try{result=await activation.result;}finally{await activation.dispose();}
+  const stageId=randomUUID();onStage({event:'started',id:stageId,stage:i+1,role:stage.role,provider:stage.provider,model:stage.model,fast:stage.fast,prompt});
+  const isolated=!writable&&stage.provider!=='codex';
+  let result;try{
+   const activation=await subagents.start(isolated?'spawn':provider,{label:stage.role,parent,prompt:[{type:'text',text:prompt}],agentOptions:{provider:stage.provider,model:stage.model,...(isolated?{}:{fast:stage.fast,readOnly:!writable})},...(isolated?{toolFilter:{allow:[]}}:{}),signal});
+   try{result=await activation.result;}finally{await activation.dispose();}
+  }catch(error){onStage({event:'finished',id:stageId,status:'failed',output:error.message});throw error;}
+  onStage({event:'finished',id:stageId,status:result.stopReason==='completed'?'completed':'failed',output:(result.output??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n')});
   if(result.stopReason!=='completed')throw Error(`Stage ${i+1} (${stage.role}) stopped: ${result.stopReason}${result.diagnostic?` — ${result.diagnostic}`:''}`);
   handoff=(result.output??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
   if(!handoff)throw Error(`Stage ${i+1} (${stage.role}) returned no text`);

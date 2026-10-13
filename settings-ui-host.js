@@ -3,6 +3,7 @@ import {join} from 'node:path';
 import {readFileSync} from 'node:fs';
 import {readSettings,saveSettings,validateSettings} from './settings.js';
 import {readBoard,saveBoard,validateBoard} from './board.js';
+import {listActivities} from './activity.js';
 
 export function modelCatalog(){
  const base=join(process.env.DSH_HOME??join(homedir(),'.dsh'),'plugins/subscriptions');
@@ -40,7 +41,7 @@ export function mountSettingsUi(ctx,provider){
   const connection=scope.get('connection');
   const snapshot=()=>({settings:readSettings(),board:readBoard(),parent:scope.agentDefaultModel.currentSelection(),models:modelCatalog(),active_workers:provider.active});
   let saves=Promise.resolve();
-  for(const endpoint of ['read','save','board-save']){
+  for(const endpoint of ['read','save','board-save','graph-read']){
    const method=`adaptive-team.${endpoint}`;
    scope.effect(()=>connection.fetch.register({path:`/api/${method}`,methods:['POST'],requestBody:'buffered',async fetch(request){
     if(request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()!=='application/json')return new Response('JSON required',{status:415});
@@ -55,7 +56,7 @@ export function mountSettingsUi(ctx,provider){
       const operation=saves.then(async()=>{const board=validateBoard(envelope.payload);const models=modelCatalog();for(const stage of board.stages){await scope.llm.resolveCallConfig({provider:stage.provider,model:stage.model},request.signal);if(stage.fast&&!models.codex?.some(m=>m.id===stage.model&&m.fastTier))throw Error(`${stage.model} does not advertise Fast mode`);}request.signal.throwIfAborted();saveBoard(board);});
       saves=operation.catch(()=>{});await operation;
      }
-     result={ok:true,value:snapshot()};
+     result={ok:true,value:endpoint==='graph-read'?{...snapshot(),activities:listActivities(envelope.payload?.sessionId)}:snapshot()};
     }catch(error){result={ok:false,error:{message:error.message}};}
     return Response.json({type:'server-response',rpcId:envelope.rpcId,result});
    }}),`adaptive-team settings ${endpoint}`);

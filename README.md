@@ -30,6 +30,8 @@ node '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/pnpm/bin/pnp
 
 This command only installs dependencies declared in the desktop profile; inspect the profile backup path printed by the installer if you need to revert. Open **Settings → Agent team** and confirm the model choices.
 
+The session header's **指揮グラフ** button opens a live command map. It shows the parent, parallel DSH jobs, their statuses and output, plus the saved ordered role board. Select a node to open its details and a chat field on the right. That field sends a node-specific instruction to the parent session; DSH one-shot jobs cannot be resumed by chatting directly with them. A running DSH job can be stopped from its details with a two-step confirmation. Team worker prompts and handoffs are kept only in host memory and scoped to their parent session; they disappear when the host restarts.
+
 For headless control, run `node scripts/setup-headless.mjs` once, then install the personal skill from `skills/dsh-control` into `~/.agents/skills/dsh-control` (a symlink is fine). The setup script refuses to overwrite an existing `dots-control` profile. To use the controller directly:
 
 ```bash

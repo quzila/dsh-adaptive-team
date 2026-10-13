@@ -1,6 +1,7 @@
 import {readFileSync,writeFileSync,renameSync,mkdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
+import {randomUUID} from 'node:crypto';
 export const settingsPath=join(process.env.DSH_HOME??join(homedir(),'.dsh'),'local-plugins/claude-codex-team/settings.json');
 export const providers=Object.freeze(['codex','claude','grok','antigravity']);
 export const defaults=Object.freeze({worker_provider:'codex',worker_model:'gpt-6.1-sol',worker_fast:false,max_parallel:4,parallelism_mode:'auto',nested_model:'gpt-6-luna',nested_parallel:2,max_depth:2});
@@ -39,7 +40,11 @@ export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,
   const depth=Math.max(request.parent?.session?.header?.delegationDepth??0,request.parent?.options?.subagentDepth??0);
   if(depth>=s.max_depth)throw Error(`Delegation depth limit reached (${s.max_depth}). Finish this task without another child.`);
   if(active>=s.max_parallel)throw Error(`Worker capacity reached (${active}/${s.max_parallel}). Collect or stop an existing job before starting another.`);
-  active++;onState({active,limit:s.max_parallel,provider:route,model});
+  active++;
+  const activityId=randomUUID(),sessionId=request.parent?.session?.header?.id;
+  const prompt=(request.prompt??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').slice(0,20000);
+  const boardStage=prompt.startsWith('You are stage ');
+  onState({event:'started',id:activityId,sessionId,label:request.label,provider:route,model,fast,prompt:boardStage?'':prompt,boardStage,active,limit:s.max_parallel});
   let run;
   try{
    if(route==='codex'){
@@ -52,9 +57,10 @@ export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,
     const {fast:unused,readOnly:unusedReadOnly,...childOptions}=options;
     run=await harness.start({...request,maxDepth:s.max_depth,agentOptions:{...childOptions,provider:route,model}});
    }
-  }catch(e){active--;throw e;}
+  }catch(e){active--;onState({event:'finished',id:activityId,sessionId,status:'failed',output:e.message,active,limit:s.max_parallel});throw e;}
+  const result=run.result.then(value=>{onState({event:'finished',id:activityId,sessionId,status:value.stopReason==='completed'?'completed':'failed',output:(value.output??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n'),active,limit:s.max_parallel});return value;},error=>{onState({event:'finished',id:activityId,sessionId,status:'failed',output:error.message,active,limit:s.max_parallel});throw error;});
   let disposal;
-  return {...run,result:run.result,dispose(){disposal??=(async()=>{await run.dispose();active--;onState({active,limit:s.max_parallel});})();return disposal;}};
+  return {...run,result,dispose(){disposal??=(async()=>{await run.dispose();active--;onState({event:'disposed',id:activityId,sessionId,active,limit:s.max_parallel});})();return disposal;}};
  }};
  return provider;
 }
