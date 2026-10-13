@@ -26,6 +26,8 @@ test('nested Codex flags select Luna without modifying global configuration',()=
  assert.throws(()=>validateSettings({max_parallel:0}),/positive/);assert.throws(()=>validateSettings({max_parallel:1.5}),/positive/);assert.throws(()=>validateSettings({worker_provider:'unknown'}));
 });
 import {saveUiSettings,validateUiPayload} from './settings-ui-host.js';
+import {runBoard,validateBoard,saveBoard,readBoard} from './board.js';
+import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
 function uiContext(){let parent={provider:'claude',model:'claude-sonnet-5-5',reasoningEffort:'high'};const saved=[];return {saved,agentDefaultModel:{currentSelection:()=>({...parent}),saveSelection:async p=>{parent={...p};saved.push({...p});}},llm:{resolveCallConfig:async p=>{if(p.model==='not-a-model')throw Error('Unknown model');}}};}
 test('UI saves parent and auto/manual worker values through the same settings store',async()=>{
  const ctx=uiContext();let current={...defaults};const result=await saveUiSettings(ctx,{parent:{provider:'codex',model:'gpt-6-luna'},settings:{worker_provider:'codex',worker_model:'gpt-6-luna',max_parallel:3,parallelism_mode:'manual'}},new AbortController().signal,{read:()=>current,save:p=>{current={...current,...p};}});
@@ -38,4 +40,19 @@ test('UI rejects invalid model or worker count before changing saved state',asyn
 });
 test('UI restores parent default if worker settings cannot be written',async()=>{
  const ctx=uiContext();await assert.rejects(saveUiSettings(ctx,{parent:{provider:'codex',model:'gpt-6-luna'},settings:{max_parallel:6}},new AbortController().signal,{read:()=>({...defaults}),save:()=>{throw Error('disk failure');}}),/disk failure/);assert.equal(ctx.agentDefaultModel.currentSelection().model,'claude-sonnet-5-5');
+});
+test('ordered board hands each completed result to the next model and applies Fast only to Codex',async()=>{
+ const seen=[];const board={stages:[{role:'Plan',instruction:'Plan only',provider:'antigravity',model:'gemini-test',fast:false},{role:'Adapt',instruction:'Adapt for Codex',provider:'claude',model:'claude-test',fast:false},{role:'Implement',instruction:'Implement the plan',provider:'codex',model:'gpt-test',fast:true}]};
+ const result=await runBoard({board,task:'Build a widget',parent:{},signal:new AbortController().signal,llm:{resolveCallConfig:async r=>seen.push(['route',r.provider,r.model])},subagents:{start:async(_provider,spec)=>{seen.push(['stage',spec.agentOptions.provider,spec.agentOptions.fast,spec.prompt[0].text]);return {result:Promise.resolve({stopReason:'completed',output:[{type:'text',text:`handoff ${seen.filter(x=>x[0]==='stage').length}`}] }),dispose:async()=>seen.push(['dispose'])};}}});
+ assert.equal(result.final,'handoff 3');assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='claude')[3],/handoff 1/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/handoff 2/);assert.match(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[3],/Original user task.*Build a widget/s);assert.equal(seen.find(x=>x[0]==='stage'&&x[1]==='codex')[2],true);assert.equal(seen.filter(x=>x[0]==='dispose').length,3);
+});
+test('board stops on failure and keeps private local configuration out of source',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'dsh-board-'));const path=join(dir,'board.json');
+ try{const board={stages:[{role:'Review',instruction:'Read input',provider:'grok',model:'grok-test',fast:false}]};saveBoard(board,path);assert.deepEqual(readBoard(path),board);assert.throws(()=>validateBoard({stages:[{...board.stages[0],fast:true}]}),/Fast/);
+ await assert.rejects(runBoard({board,task:'Task',parent:{},signal:new AbortController().signal,llm:{resolveCallConfig:async()=>{}},subagents:{start:async()=>({result:Promise.resolve({stopReason:'error',output:[],diagnostic:'failed'}),dispose:async()=>{}})}}),/stopped: error/);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('native Codex worker receives per-run Fast setting',async()=>{
+ let config;const p=makeAdaptiveProvider({createNative:async o=>{config=o;return {start:async()=>({result:Promise.resolve({}),dispose:async()=>{}})};}});
+ const run=await p.start(req({provider:'codex',model:'gpt-6.1-sol',fast:true,readOnly:true}));assert.equal(config.fast,true);assert.equal(config.readOnly,true);assert(nativeOverrides(defaults,undefined,true,true).includes('service_tier="fast"'));assert(nativeOverrides(defaults,undefined,true,true).includes('sandbox_mode="read-only"'));await run.dispose();
 });

@@ -14,13 +14,13 @@ for(const name of ['dsh-plugin-subscriptions','@deepseek-ai/dsh-subagent-codex']
 const marker='# dsh-adaptive-team';
 if(patchText.includes(marker)||pkg.dependencies?.['dsh-claude-codex-team'])throw Error('Plugin appears installed already; review the existing desktop profile.');
 const catalog=JSON.parse(fs.readFileSync(path.join(dsh,'plugins/subscriptions/models.json'),'utf8'));
-const models=['codex','claude'].flatMap(provider=>(catalog[provider]?.models??[]).map(m=>({provider,model:m.id})));
+const models=['codex','claude','grok','antigravity'].flatMap(provider=>(catalog[provider]?.models??[]).map(m=>({provider,model:m.id})));
 if(!models.length)throw Error('Connect Claude or ChatGPT in DSH before installing this plugin.');
 const backup=path.join(dsh,'backups',`adaptive-team-${Date.now()}`);fs.mkdirSync(backup,{recursive:true,mode:0o700});
 fs.writeFileSync(path.join(backup,'package.json'),packageText,{mode:0o600});fs.writeFileSync(path.join(backup,'cordis.patch.yml'),patchText,{mode:0o600});
 pkg.dependencies['dsh-claude-codex-team']=`link:${root}`;
 pkg.dsh??={};pkg.dsh.profile??={};pkg.dsh.profile.bundles??=[];
 if(!pkg.dsh.profile.bundles.includes('dsh-claude-codex-team'))pkg.dsh.profile.bundles.push('dsh-claude-codex-team');
-const yaml=[`${marker} begin`,'- id: agent-preset-registry','  config:','    default: claude-codex-team','- id: llm-subscriptions','  name: dsh-plugin-subscriptions','  config:','    providers: [codex, claude]','- id: subagent-model-selection-settings','  config:','    enabled: true','    allowedModels:',...models.flatMap(m=>[`      - provider: ${m.provider}`,`        model: ${m.model}`]),`${marker} end`,''].join('\n');
+const yaml=[`${marker} begin`,'- id: agent-preset-registry','  config:','    default: claude-codex-team','- id: llm-subscriptions','  name: dsh-plugin-subscriptions','  config:','    providers: [codex, claude, grok, antigravity]','- id: subagent-model-selection-settings','  config:','    enabled: true','    allowedModels:',...models.flatMap(m=>[`      - provider: ${m.provider}`,`        model: ${m.model}`]),`${marker} end`,''].join('\n');
 fs.writeFileSync(packagePath,JSON.stringify(pkg,null,2)+'\n');fs.writeFileSync(patchPath,(patchText.trim()==='[]'?'':patchText.trimEnd()+'\n\n')+yaml);
 console.log(`Profile configured. Backup: ${backup}\nInstall desktop profile dependencies with the bundled pnpm command from README.md, then restart the DSH desktop app.`);

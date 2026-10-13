@@ -2,17 +2,18 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {readFileSync} from 'node:fs';
 import {readSettings,saveSettings,validateSettings} from './settings.js';
+import {readBoard,saveBoard,validateBoard} from './board.js';
 
 export function modelCatalog(){
  const base=join(process.env.DSH_HOME??join(homedir(),'.dsh'),'plugins/subscriptions');
  const auth=JSON.parse(readFileSync(join(base,'auth.json'),'utf8'));
  const models=JSON.parse(readFileSync(join(base,'models.json'),'utf8'));
- return Object.fromEntries(['codex','claude'].filter(k=>Object.keys(auth[k]?.accounts??{}).length).map(k=>[k,(models[k]?.models??[]).map(m=>({id:m.id,name:m.name??m.id}))]));
+ return Object.fromEntries(['codex','claude','grok','antigravity'].filter(k=>Object.keys(auth[k]?.accounts??{}).length).map(k=>[k,(models[k]?.models??[]).map(m=>({id:m.id,name:m.name??m.id,fastTier:!!m.fastTier}))]));
 }
 export function validateUiPayload(payload){
  if(!payload||typeof payload!=='object'||Array.isArray(payload)||!payload.parent||!payload.settings)throw Error('Invalid team settings');
  const parent=payload.parent;
- if(!['codex','claude'].includes(parent.provider)||typeof parent.model!=='string'||!parent.model.trim())throw Error('Select a parent model');
+ if(!['codex','claude','grok','antigravity'].includes(parent.provider)||typeof parent.model!=='string'||!parent.model.trim())throw Error('Select a parent model');
  if(parent.reasoningEffort!==undefined&&(typeof parent.reasoningEffort!=='string'||!parent.reasoningEffort))throw Error('Invalid parent reasoning effort');
  validateSettings(payload.settings);
  return payload;
@@ -23,6 +24,8 @@ export async function saveUiSettings(ctx,payload,signal,{read=readSettings,save=
  const next={...read(),...payload.settings};
  await ctx.llm.resolveCallConfig(payload.parent,signal);
  await ctx.llm.resolveCallConfig({provider:next.worker_provider,model:next.worker_model},signal);
+ if(next.worker_fast&&next.worker_provider!=='codex')throw Error('Worker Fast mode requires Codex');
+ if(next.worker_fast&&!modelCatalog().codex?.some(m=>m.id===next.worker_model&&m.fastTier))throw Error('This Codex worker model does not advertise Fast mode');
  await ctx.llm.resolveCallConfig({provider:'codex',model:next.nested_model},signal);
  signal?.throwIfAborted();
  await ctx.agentDefaultModel.saveSelection(payload.parent);
@@ -35,9 +38,9 @@ export async function saveUiSettings(ctx,payload,signal,{read=readSettings,save=
 export function mountSettingsUi(ctx,provider){
  ctx.inject(['connection','agentDefaultModel'],scope=>{
   const connection=scope.get('connection');
-  const snapshot=()=>({settings:readSettings(),parent:scope.agentDefaultModel.currentSelection(),models:modelCatalog(),active_workers:provider.active});
+  const snapshot=()=>({settings:readSettings(),board:readBoard(),parent:scope.agentDefaultModel.currentSelection(),models:modelCatalog(),active_workers:provider.active});
   let saves=Promise.resolve();
-  for(const endpoint of ['read','save']){
+  for(const endpoint of ['read','save','board-save']){
    const method=`adaptive-team.${endpoint}`;
    scope.effect(()=>connection.fetch.register({path:`/api/${method}`,methods:['POST'],requestBody:'buffered',async fetch(request){
     if(request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()!=='application/json')return new Response('JSON required',{status:415});
@@ -47,6 +50,9 @@ export function mountSettingsUi(ctx,provider){
     try{
      if(endpoint==='save'){
       const operation=saves.then(()=>saveUiSettings(scope,envelope.payload,request.signal));
+      saves=operation.catch(()=>{});await operation;
+     }else if(endpoint==='board-save'){
+      const operation=saves.then(async()=>{const board=validateBoard(envelope.payload);const models=modelCatalog();for(const stage of board.stages){await scope.llm.resolveCallConfig({provider:stage.provider,model:stage.model},request.signal);if(stage.fast&&!models.codex?.some(m=>m.id===stage.model&&m.fastTier))throw Error(`${stage.model} does not advertise Fast mode`);}request.signal.throwIfAborted();saveBoard(board);});
       saves=operation.catch(()=>{});await operation;
      }
      result={ok:true,value:snapshot()};

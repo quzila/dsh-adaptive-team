@@ -22,7 +22,7 @@
     "./client": "./client.js",
     "./headless": "./headless.js"
   },
-  "description": "Configurable Claude and Codex workers for DeepSeek Harness, with optional local dots control",
+  "description": "Configurable multi-provider role board and Codex workers for DeepSeek Harness, with optional local dots control",
   "license": "MIT",
   "scripts": {
     "test": "node --test test.mjs"

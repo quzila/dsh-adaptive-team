@@ -10,7 +10,7 @@ const desktopPackage=JSON.parse(fs.readFileSync(path.join(desktop,'package.json'
 const linked=desktopPackage.dependencies?.['dsh-claude-codex-team'];
 if(linked!==`link:${root}`)throw Error('Install this plugin into the desktop profile first; see README.md');
 const catalog=JSON.parse(fs.readFileSync(path.join(dsh,'plugins/subscriptions/models.json'),'utf8'));
-const allowedModels=['codex','claude'].flatMap(provider=>(catalog[provider]?.models??[]).map(m=>({provider,model:m.id})));
+const allowedModels=['codex','claude','grok','antigravity'].flatMap(provider=>(catalog[provider]?.models??[]).map(m=>({provider,model:m.id})));
 if(!allowedModels.length)throw Error('No subscription models found. Connect Claude or ChatGPT in DSH first.');
 if(fs.existsSync(target))throw Error(`Profile already exists: ${target}. Keep the existing profile or move it aside before setup.`);
 fs.mkdirSync(target,{recursive:true});
@@ -20,9 +20,9 @@ fs.writeFileSync(path.join(target,'cordis.yml'),'[]\n');
 const parent={provider:'claude',model:'claude-sonnet-5-5',reasoningEffort:'high'};
 const patch=[
  {id:'agent-default-model',config:parent},
- {id:'llm-subscriptions',config:{providers:['codex','claude']}},
+ {id:'llm-subscriptions',config:{providers:['codex','claude','grok','antigravity']}},
  {id:'tool-subagent',disabled:true},{id:'tool-subagent-fork',disabled:true},{id:'tool-workflow',disabled:true},
- {id:'system-prompt',config:{personaSuffix:'Your working directory is {{cwd}}.',personaPrefix:'You coordinate an adaptive agent team. Read team_settings before delegating. Use worker(run_in_background:true) for independent tasks and job_output to collect each result. Choose any advertised child model per task. In auto mode choose useful concurrency up to max_parallel; in manual mode use the requested count if independent tasks exist. Do not raise saved limits. Review diffs and meaningful tests. Respect repository instructions. Reply in the user’s language.'}},
+ {id:'system-prompt',config:{personaSuffix:'Your working directory is {{cwd}}.',personaPrefix:'You coordinate an adaptive agent team. Read team_settings before delegating. When the user asks to create or edit the role board in chat, read team_board first and save the complete revised card list with team_board_edit. When the user asks to follow the saved role board, call team_board with the task; it runs ordered stages and passes each result to the next. Set writable:true only when the human asks the board to edit files. Use worker(run_in_background:true) for independent tasks and job_output to collect each result. Choose any advertised child model per task. In auto mode choose useful concurrency up to max_parallel; in manual mode use the requested count if independent tasks exist. Do not raise saved limits. Review diffs and meaningful tests. Respect repository instructions. Reply in the user’s language.'}},
  {insert:[{id:'subagent-model-selection-settings',name:'@deepseek-ai/dsh-tool-subagent/model-selection-settings',config:{enabled:true,allowedModels}},{id:'adaptive-headless-tools',name:'dsh-claude-codex-team/headless'}]},
  {id:'preset-claude-codex-team',disabled:true}
 ];
