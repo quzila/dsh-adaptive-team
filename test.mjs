@@ -1,6 +1,9 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {makeAdaptiveProvider,nativeOverrides,defaults,validateSettings} from './settings.js';
-import {beginActivity,finishActivity,listActivities} from './activity.js';
+import {beginActivity,finishActivity,listActivities,updateActivityStream} from './activity.js';
+import {extractJobHistory,readJobHistory} from './session-history.js';
+import {validatePlanGraph,savePlanGraph,readPlanGraph,sessionPlanPath} from './plan-graph.js';
+import {codexNotificationEvent,appendTranscriptEvent,readTranscriptEvents} from './native-transcript.js';
 const req=(options={})=>({parent:{session:{header:{delegationDepth:0}},options:{}},prompt:[{type:'text',text:'bounded task'}],agentOptions:options});
 test('live configurable capacity and per-task model routing',async()=>{
  let settings={...defaults,max_parallel:2};let live=0,peak=0;const models=[];
@@ -64,6 +67,61 @@ test('command graph details stay scoped to one session and follow worker complet
  const request=req({provider:'claude',model:'claude-test'});request.parent.session.header.id=sessionId;request.label='Review files';request.prompt=[{type:'text',text:'Check only the named files'}];
  const run=await p.start(request);await run.result;await run.dispose();
  for(const event of events){if(event.event==='started')beginActivity(event.sessionId,{id:event.id,label:event.label,prompt:event.prompt});if(event.event==='finished')finishActivity(event.sessionId,event.id,event.status,event.output);}
+ const id=listActivities(sessionId)[0].id;updateActivityStream(sessionId,id,'Working');assert.equal(listActivities(sessionId)[0].stream,'Working');updateActivityStream(sessionId,id,null,true);
  assert.deepEqual(listActivities('other-session'),[]);
  assert.deepEqual(listActivities(sessionId).map(row=>[row.label,row.prompt,row.status,row.output]),[['Review files','Check only the named files','completed','finished task']]);
+});
+test('command graph limits agent nodes and keeps shell jobs out of the diagram',async()=>{
+ let plugin;let stateCall=0;const React={Fragment:'fragment',createElement:(type,props,...children)=>({type,props:props??{},children}),useState(value){stateCall++;return [stateCall===1?true:stateCall===2?{board:{stages:[]},parent:{provider:'claude',model:'test'},planGraph:{nodes:[{id:'review',role:'Planned reviewer',instruction:'Review later',provider:'codex',model:'test'}],edges:[{from:'parent',to:'review'}]}}:value,()=>{}];},useEffect(){}};
+ const previousWindow=globalThis.window,previousDocument=globalThis.document;
+ try{
+  globalThis.window={__ModuleLoader__:{load:definition=>{plugin=definition.factory(name=>name==='react'?React:{createPortal:node=>node});}}};globalThis.document={body:{}};
+  await import('./client.js?graph-ui-test');
+  let Graph;const ctx={effect(){},locale:{bind:()=>key=>key},get:()=>({rpc:{}}),slots:{inject:(_slot,register)=>register(),register:(slot,component)=>{if(slot.id==='adaptive-team-command-graph')Graph=component;}}};plugin.apply(ctx);
+  const rows=[...Array.from({length:12},(_,i)=>({id:`agent-${i}`,kind:'subagent',label:`Worker ${i}`,status:'completed',startedAt:i+1})),...Array.from({length:8},(_,i)=>({id:`shell-${i}`,kind:'bash',label:`private-command-${i}`,status:'completed',startedAt:i+1}))];
+  const tree=Graph({sessionId:'s',useJobs:selector=>selector({rows:{s:rows},observed:{}}),watchRows:()=>()=>{},observe:()=>()=>{},rpc:{},sendToParent:async()=>{},killJob:async()=>true});
+  const visit=(node,fn)=>{if(Array.isArray(node)){node.forEach(child=>visit(child,fn));return;}if(!node||typeof node!=='object')return;fn(node);visit(node.children,fn);};
+  const graphs=[];visit(tree,node=>{if(node.props.className==='atg-graph')graphs.push(node);});assert.equal(graphs.length,2);const graph=graphs[1];
+  const plannedText=[];visit(graphs[0],node=>{for(const child of node.children)if(typeof child==='string')plannedText.push(child);});assert(plannedText.includes('Planned reviewer'));
+  const graphText=[];visit(graph,node=>{for(const child of node.children)if(typeof child==='string')graphText.push(child);});
+  assert.equal(graphText.filter(text=>/^Worker \d+$/.test(text)).length,6);
+  assert(!graphText.some(text=>text.includes('private-command')));
+  const allText=[];visit(tree,node=>{for(const child of node.children)if(typeof child==='string')allText.push(child);});
+  assert(allText.some(text=>text.includes('ツール・コマンド実行 8 件')));
+  assert(allText.some(text=>text.includes('過去の担当・中断した担当 6 件')));
+ }finally{globalThis.window=previousWindow;globalThis.document=previousDocument;}
+});
+test('planned graph supports fan-out and join before execution',()=>{
+ const graph={nodes:[{id:'a',role:'Plan',instruction:'Prepare options',provider:'claude',model:'test'},{id:'b',role:'Research',instruction:'Find evidence',provider:'codex',model:'test'},{id:'c',role:'Join',instruction:'Combine results',provider:'grok',model:'test'}],edges:[{from:'parent',to:'a'},{from:'parent',to:'b'},{from:'a',to:'c'},{from:'b',to:'c'}]};
+ assert.deepEqual(validatePlanGraph(graph),graph);
+ const dir=mkdtempSync(join(tmpdir(),'dsh-plan-'));const path=join(dir,'plan-graph.json');try{savePlanGraph(graph,path);assert.deepEqual(readPlanGraph(path),graph);}finally{rmSync(dir,{recursive:true,force:true});}
+ assert.throws(()=>validatePlanGraph({...graph,edges:[{from:'parent',to:'a'}]}),/path from the parent/);
+ assert.throws(()=>validatePlanGraph({...graph,edges:[...graph.edges,{from:'c',to:'a'}]}),/cycle/);
+ assert.throws(()=>validatePlanGraph({...graph,nodes:[graph.nodes[0],graph.nodes[0]]}),/unique/);
+ assert.notEqual(sessionPlanPath('session-11111111-1111-1111-1111-111111111111'),sessionPlanPath('session-22222222-2222-2222-2222-222222222222'));
+ assert.throws(()=>sessionPlanPath('../private'),/Invalid session ID/);
+});
+test('saved worker calls reconnect prompts and results by job id',()=>{
+ const events=[
+  {type:'tool/call',time:1234,data:{callId:'call-a',name:'worker',arguments:JSON.stringify({description:'Review',provider:'codex',model:'test-model',prompt:'Inspect a sample file'})}},
+  {type:'tool/result',data:{message:{toolCallId:'call-a',content:[{type:'text',text:'Started as subagent-7'}]}}},
+  {type:'tool/call',data:{callId:'call-b',name:'job_output',arguments:JSON.stringify({job_id:'subagent-7'})}},
+  {type:'tool/result',data:{message:{toolCallId:'call-b',content:[{type:'text',text:'Review completed'}]}}}
+ ];
+ assert.deepEqual(extractJobHistory(events)['subagent-7'],{prompt:'Inspect a sample file',provider:'codex',model:'test-model',description:'Review',startedAt:1234,status:'recorded',output:'Review completed'});
+ assert.deepEqual(readJobHistory('../other-session'),{});
+});
+test('native Codex progress becomes a private chronological chat',()=>{
+ const previous=process.env.DSH_HOME,home=mkdtempSync(join(tmpdir(),'dsh-chat-'));
+ process.env.DSH_HOME=home;
+ try{
+  const sessionId='session-11111111-1111-1111-1111-111111111111',activityId='22222222-2222-2222-2222-222222222222';
+  const started=codexNotificationEvent({method:'item/started',params:{item:{type:'commandExecution',command:'npm test'}}});
+  const completed=codexNotificationEvent({method:'item/completed',params:{item:{type:'commandExecution',command:'npm test',aggregatedOutput:'14 tests passed',status:'completed'}}});
+  const reply=codexNotificationEvent({method:'item/completed',params:{item:{type:'agentMessage',phase:'commentary',text:'Checking the result'}}});
+  assert.equal(codexNotificationEvent({method:'item/agentMessage/delta',params:{delta:'private'}}),null);
+  for(const event of [started,completed,reply])appendTranscriptEvent(sessionId,activityId,event);
+  assert.deepEqual(readTranscriptEvents(sessionId,activityId).map(row=>[row.kind,row.text]),[['tool-start','npm test'],['tool','npm test'],['assistant','Checking the result']]);
+  assert.deepEqual(readTranscriptEvents('../other',activityId),[]);
+ }finally{if(previous===undefined)delete process.env.DSH_HOME;else process.env.DSH_HOME=previous;rmSync(home,{recursive:true,force:true});}
 });

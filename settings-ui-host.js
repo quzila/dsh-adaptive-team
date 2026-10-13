@@ -4,6 +4,9 @@ import {readFileSync} from 'node:fs';
 import {readSettings,saveSettings,validateSettings} from './settings.js';
 import {readBoard,saveBoard,validateBoard} from './board.js';
 import {listActivities} from './activity.js';
+import {readJobHistory,readChildMessages} from './session-history.js';
+import {readTranscriptEvents} from './native-transcript.js';
+import {readSessionPlanGraph,saveSessionPlanGraph,validatePlanGraph} from './plan-graph.js';
 
 export function modelCatalog(){
  const base=join(process.env.DSH_HOME??join(homedir(),'.dsh'),'plugins/subscriptions');
@@ -41,7 +44,7 @@ export function mountSettingsUi(ctx,provider){
   const connection=scope.get('connection');
   const snapshot=()=>({settings:readSettings(),board:readBoard(),parent:scope.agentDefaultModel.currentSelection(),models:modelCatalog(),active_workers:provider.active});
   let saves=Promise.resolve();
-  for(const endpoint of ['read','save','board-save','graph-read']){
+  for(const endpoint of ['read','save','board-save','plan-save','graph-read']){
    const method=`adaptive-team.${endpoint}`;
    scope.effect(()=>connection.fetch.register({path:`/api/${method}`,methods:['POST'],requestBody:'buffered',async fetch(request){
     if(request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()!=='application/json')return new Response('JSON required',{status:415});
@@ -55,8 +58,15 @@ export function mountSettingsUi(ctx,provider){
      }else if(endpoint==='board-save'){
       const operation=saves.then(async()=>{const board=validateBoard(envelope.payload);const models=modelCatalog();for(const stage of board.stages){await scope.llm.resolveCallConfig({provider:stage.provider,model:stage.model},request.signal);if(stage.fast&&!models.codex?.some(m=>m.id===stage.model&&m.fastTier))throw Error(`${stage.model} does not advertise Fast mode`);}request.signal.throwIfAborted();saveBoard(board);});
       saves=operation.catch(()=>{});await operation;
+     }else if(endpoint==='plan-save'){
+      const operation=saves.then(async()=>{const graph=validatePlanGraph(envelope.payload?.graph);for(const node of graph.nodes)await scope.llm.resolveCallConfig({provider:node.provider,model:node.model},request.signal);request.signal.throwIfAborted();saveSessionPlanGraph(envelope.payload?.sessionId,graph);});
+      saves=operation.catch(()=>{});await operation;
      }
-     result={ok:true,value:endpoint==='graph-read'?{...snapshot(),activities:listActivities(envelope.payload?.sessionId)}:snapshot()};
+     if(endpoint==='graph-read'){
+      const sessionId=envelope.payload?.sessionId,activities=listActivities(sessionId),activityId=envelope.payload?.activityId;
+      const selected=activities.find(row=>row.id===activityId);
+      result={ok:true,value:{...snapshot(),planGraph:readSessionPlanGraph(sessionId),activities,history:readJobHistory(sessionId),transcript:selected?(selected.childSessionId?.startsWith('session-')?readChildMessages(selected.childSessionId):readTranscriptEvents(sessionId,activityId)):[]}};
+     }else result={ok:true,value:snapshot()};
     }catch(error){result={ok:false,error:{message:error.message}};}
     return Response.json({type:'server-response',rpcId:envelope.rpcId,result});
    }}),`adaptive-team settings ${endpoint}`);

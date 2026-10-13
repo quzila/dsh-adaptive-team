@@ -5,6 +5,10 @@ node_modules/
 .env.*
 settings.json
 board.json
+plan-graph.json
+plan-graphs/
+activities/
+transcripts/
 *.jsonl
 *.log
 *.lock

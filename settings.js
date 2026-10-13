@@ -24,8 +24,9 @@ export function nativeOverrides(s,effort,fast=false,readOnly=false){return [
  ...(fast?['-c','service_tier="fast"']:[]),
  ...(readOnly?['-c','sandbox_mode="read-only"']:[]),
 ];}
-export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,onState=()=>{}}){
+export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,onState=()=>{},onChild=()=>{}}){
  let active=0;
+ const notify=event=>{try{onState(event);}catch{}};
  const provider={name:'adaptive-worker',capabilities:{agentOptions:true,outputSchema:false,depthLimit:false,toolFilter:false,persona:false},inheritsParentContext:false,
  get agentRouteDefaults(){const s=read();return {provider:s.worker_provider,model:s.worker_model};},
  get active(){return active;},
@@ -44,11 +45,11 @@ export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,
   const activityId=randomUUID(),sessionId=request.parent?.session?.header?.id;
   const prompt=(request.prompt??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').slice(0,20000);
   const boardStage=prompt.startsWith('You are stage ');
-  onState({event:'started',id:activityId,sessionId,label:request.label,provider:route,model,fast,prompt:boardStage?'':prompt,boardStage,active,limit:s.max_parallel});
+  notify({event:'started',id:activityId,sessionId,label:request.label,provider:route,model,fast,prompt:boardStage?'':prompt,boardStage,active,limit:s.max_parallel});
   let run;
   try{
    if(route==='codex'){
-    const native=await createNative({model,reasoningEffort:options.reasoningEffort,fast,readOnly:options.readOnly??false,settings:s});
+    const native=await createNative({model,reasoningEffort:options.reasoningEffort,fast,readOnly:options.readOnly??false,settings:s,sessionId,activityId});
     const {agentOptions,...nativeRequest}=request;
     const guidance=`Native subtasks are enabled. For independent smaller tasks you may use Codex spawn_agent with an explicit model and reasoning_effort, defaulting to ${s.nested_model}. Limit simultaneously open native subagents to ${s.nested_parallel}. Supply self-contained context and disjoint file ownership, wait for their completion and close them if the API exposes an explicit close operation; otherwise the app-server owner disposes the finished tree. Do not create deeper nested teams. Honor the parent's requested delegation count; do not delegate trivial tasks unnecessarily.\n\n`;
     run=await native.start({...nativeRequest,prompt:[{type:'text',text:guidance},...request.prompt]});
@@ -57,10 +58,11 @@ export function makeAdaptiveProvider({read=readSettings,createNative,getHarness,
     const {fast:unused,readOnly:unusedReadOnly,...childOptions}=options;
     run=await harness.start({...request,maxDepth:s.max_depth,agentOptions:{...childOptions,provider:route,model}});
    }
-  }catch(e){active--;onState({event:'finished',id:activityId,sessionId,status:'failed',output:e.message,active,limit:s.max_parallel});throw e;}
-  const result=run.result.then(value=>{onState({event:'finished',id:activityId,sessionId,status:value.stopReason==='completed'?'completed':'failed',output:(value.output??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n'),active,limit:s.max_parallel});return value;},error=>{onState({event:'finished',id:activityId,sessionId,status:'failed',output:error.message,active,limit:s.max_parallel});throw error;});
+  }catch(e){active--;notify({event:'finished',id:activityId,sessionId,status:'failed',output:e.message,active,limit:s.max_parallel});throw e;}
+  try{onChild(sessionId,activityId,run.id);}catch{}
+  const result=run.result.then(value=>{notify({event:'finished',id:activityId,sessionId,status:value.stopReason==='completed'?'completed':'failed',output:(value.output??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n'),active,limit:s.max_parallel});return value;},error=>{notify({event:'finished',id:activityId,sessionId,status:'failed',output:error.message,active,limit:s.max_parallel});throw error;});
   let disposal;
-  return {...run,result,dispose(){disposal??=(async()=>{await run.dispose();active--;onState({event:'disposed',id:activityId,sessionId,active,limit:s.max_parallel});})();return disposal;}};
+  return {...run,result,dispose(){disposal??=(async()=>{await run.dispose();active--;notify({event:'disposed',id:activityId,sessionId,active,limit:s.max_parallel});})();return disposal;}};
  }};
  return provider;
 }
